@@ -24,8 +24,15 @@ mod rmiss {
 
 
 use anyhow::{Context, Error, Result};
+use glam::{Mat4, Vec3};
+use vulkano::acceleration_structure::{AccelerationStructure, AccelerationStructureBuildGeometryInfo, AccelerationStructureBuildRangeInfo, AccelerationStructureBuildType, AccelerationStructureCreateInfo, AccelerationStructureGeometries, AccelerationStructureGeometryInstancesData, AccelerationStructureGeometryInstancesDataType, AccelerationStructureGeometryTrianglesData, AccelerationStructureInstance, AccelerationStructureType, BuildAccelerationStructureFlags, BuildAccelerationStructureMode};
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
+use vulkano::format::Format;
 use vulkano::image::{Image, ImageCreateInfo, ImageType};
 use vulkano::image::view::ImageView;
+use vulkano::memory;
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use std::default;
 use std::fmt::Debug;
@@ -42,6 +49,7 @@ use vulkano::{
     instance::{Instance, InstanceExtensions},
     pipeline::graphics::vertex_input::Vertex,
     swapchain::{Surface, Swapchain, SwapchainCreateInfo},
+    sync::{now, GpuFuture}
 };
 use winit::{
     application::ApplicationHandler,
@@ -59,17 +67,11 @@ struct MyVertex {
     position: [f32; 3],
 }
 
-const VERTICES: [MyVertex; 3] = [
-    MyVertex {
-        position: [0.0, -0.5, 0.0],
-    },
-    MyVertex {
-        position: [0.5, 0.5, 0.0],
-    },
-    MyVertex {
-        position: [-0.5, 0.5, 0.0],
-    },
-];
+#[repr(C)]
+struct Camera {
+    proj: [f32; 16],
+    view: [f32; 16],
+}
 
 struct GraphicsState {
     instance: Arc<Instance>,
@@ -77,6 +79,10 @@ struct GraphicsState {
     surface: Arc<Surface>,
     device: Arc<Device>,
     queue: Arc<Queue>,
+    swapchain_images: Vec<Arc<Image>>,
+    storage_images: Vec<Arc<ImageView>>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    memory_allocator: Arc<StandardMemoryAllocator>,
 }
 
 impl GraphicsState {
@@ -207,6 +213,59 @@ impl GraphicsState {
             .collect::<Result<Vec<_>>>()
             .context("Failed to create storage images")?;
 
+        let command_buffer_allocator = Arc::new(
+            StandardCommandBufferAllocator::new(device.clone(), Default::default())
+        );
+
+        let vertices = [
+            MyVertex { position: [0.0, -0.5, 0.0] },
+            MyVertex { position: [0.5, 0.5, -0.1] },
+            MyVertex { position: [-0.5, 0.5, -0.2] },
+        ];
+
+        let vertex_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER | BufferUsage::SHADER_DEVICE_ADDRESS | BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vertices,
+        )
+        .context("Failed to create vertex buffer")?;
+
+        let blas = unsafe {
+            build_acceleration_structure_triangles(
+                &vertex_buffer,
+                memory_allocator.clone(),
+                &command_buffer_allocator,
+                device.clone(),
+                queue.clone(),
+            )
+        };
+
+        let tlas = unsafe {
+            build_top_level_acceleration_structure(
+                vec![AccelerationStructureInstance {
+                    acceleration_structure_reference: blas.device_address().into(),
+                    ..Default::default()
+                }],
+                memory_allocator.clone(),
+                &command_buffer_allocator,
+                device.clone(),
+                queue.clone(),
+            )
+        };
+
+        let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 4.0 / 3.0, 0.01, 100.0);
+        let view = Mat4::look_at_rh(
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+        );
 
         Ok(Self {
             instance,
@@ -214,6 +273,10 @@ impl GraphicsState {
             surface,
             device,
             queue,
+            swapchain_images,
+            storage_images,
+            command_buffer_allocator,
+            memory_allocator
         })
     }
 }
@@ -330,4 +393,176 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+
+
+
+unsafe fn build_acceleration_structure_common(
+    geometries: AccelerationStructureGeometries,
+    primitive_count: u32,
+    ty: AccelerationStructureType,
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: &Arc<StandardCommandBufferAllocator>,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+) -> Arc<AccelerationStructure> {
+    let mut as_build_geometry_info = AccelerationStructureBuildGeometryInfo {
+        mode: BuildAccelerationStructureMode::Build,
+        flags: BuildAccelerationStructureFlags::PREFER_FAST_TRACE,
+        ..AccelerationStructureBuildGeometryInfo::new(geometries)
+    };
+
+    let as_build_sizes_info = device
+        .acceleration_structure_build_sizes(
+            AccelerationStructureBuildType::Device,
+            &as_build_geometry_info,
+            &[primitive_count],
+        )
+        .unwrap();
+
+    // We create a new scratch buffer for each acceleration structure for simplicity. You may want
+    // to reuse scratch buffers if you need to build many acceleration structures.
+    let scratch_buffer = Buffer::new_slice::<u8>(
+        memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::SHADER_DEVICE_ADDRESS | BufferUsage::STORAGE_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo::default(),
+        as_build_sizes_info.build_scratch_size,
+    )
+    .unwrap();
+
+    let acceleration = unsafe {
+        AccelerationStructure::new(
+            device.clone(),
+            AccelerationStructureCreateInfo {
+                ty,
+                ..AccelerationStructureCreateInfo::new(
+                    Buffer::new_slice::<u8>(
+                        memory_allocator,
+                        BufferCreateInfo {
+                            usage: BufferUsage::ACCELERATION_STRUCTURE_STORAGE
+                                | BufferUsage::SHADER_DEVICE_ADDRESS,
+                            ..Default::default()
+                        },
+                        AllocationCreateInfo::default(),
+                        as_build_sizes_info.acceleration_structure_size,
+                    )
+                    .unwrap(),
+                )
+            },
+        )
+    }
+    .unwrap();
+
+    as_build_geometry_info.dst_acceleration_structure = Some(acceleration.clone());
+    as_build_geometry_info.scratch_data = Some(scratch_buffer);
+
+    let as_build_range_info = AccelerationStructureBuildRangeInfo {
+        primitive_count,
+        ..Default::default()
+    };
+
+    // For simplicity, we build a single command buffer that builds the acceleration structure,
+    // then waits for its execution to complete.
+    let mut builder = AutoCommandBufferBuilder::primary(
+        command_buffer_allocator.clone(),
+        queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+    .unwrap();
+
+    unsafe {
+    builder
+        .build_acceleration_structure(
+            as_build_geometry_info,
+            vec![as_build_range_info].into(),
+        )
+        .unwrap();
+    }
+
+    let command_buffer = builder.build().unwrap();
+
+    let build_future = now(device.clone())
+        .then_execute(queue.clone(), command_buffer)
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap();
+    
+    build_future.wait(None).unwrap();
+
+
+    acceleration
+}
+
+unsafe fn build_acceleration_structure_triangles(
+    vertex_buffer: &Subbuffer<[MyVertex]>,
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: &Arc<StandardCommandBufferAllocator>,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+) -> Arc<AccelerationStructure> {
+    let primitive_count = (vertex_buffer.len() / 3) as u32;
+    let as_geometry_triangles_data = AccelerationStructureGeometryTrianglesData {
+        max_vertex: vertex_buffer.len() as _,
+        vertex_data: Some(vertex_buffer.clone().into_bytes()),
+        vertex_stride: size_of::<MyVertex>() as _,
+        ..AccelerationStructureGeometryTrianglesData::new(Format::R32G32B32_SFLOAT)
+    };
+
+    let geometries = AccelerationStructureGeometries::Triangles(vec![as_geometry_triangles_data]);
+
+    unsafe { build_acceleration_structure_common(
+        geometries,
+        primitive_count,
+        AccelerationStructureType::BottomLevel,
+        memory_allocator,
+        command_buffer_allocator,
+        device,
+        queue,
+    )}
+}
+
+unsafe fn build_top_level_acceleration_structure(
+    as_instances: Vec<AccelerationStructureInstance>,
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: &Arc<StandardCommandBufferAllocator>,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+) -> Arc<AccelerationStructure> {
+    let primitive_count = as_instances.len() as u32;
+
+    let instance_buffer = Buffer::from_iter(
+        memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::SHADER_DEVICE_ADDRESS
+                | BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        as_instances,
+    )
+    .unwrap();
+
+    let as_geometry_instances_data = AccelerationStructureGeometryInstancesData::new(
+        AccelerationStructureGeometryInstancesDataType::Values(Some(instance_buffer)),
+    );
+
+    let geometries = AccelerationStructureGeometries::Instances(as_geometry_instances_data);
+
+    unsafe {build_acceleration_structure_common(
+        geometries,
+        primitive_count,
+        AccelerationStructureType::TopLevel,
+        memory_allocator,
+        command_buffer_allocator,
+        device,
+        queue,
+    )}
 }

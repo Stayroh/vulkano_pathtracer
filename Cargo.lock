@@ -762,6 +762,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.30.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd47b05dddf0005d850e5644cae7f2b14ac3df487979dbfff3b56f20b1a6ae46"
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -908,6 +914,12 @@ dependencies = [
  "equivalent",
  "hashbrown",
 ]
+
+[[package]]
+name = "iter"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3b2e3c8e73c68d760d0c421025a2b740727f1e807bd4a3d6de2ceb886c5dcb9"
 
 [[package]]
 name = "itoa"
@@ -2228,6 +2240,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "glam",
+ "iter",
  "rfd",
  "vulkano",
  "vulkano-shaders",
