@@ -80,8 +80,8 @@ struct MyVertex {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct Camera {
-    proj: [[f32; 4]; 4],
     view: [[f32; 4]; 4],
+    proj: [[f32; 4]; 4],
 }
 
 struct GpuMat4([[f32; 4]; 4]);
@@ -400,9 +400,9 @@ impl GraphicsState {
         };
 
         let vertices = [
-            MyVertex { position: [0.0, -0.5, 0.0] },
-            MyVertex { position: [0.5, 0.5, -0.1] },
-            MyVertex { position: [-0.5, 0.5, -0.2] },
+            MyVertex { position: [-0.5, -0.25, 0.0] },
+            MyVertex { position: [0.0, 0.5, 0.0] },
+            MyVertex { position: [0.25, -0.1, 0.0] },
         ];
 
         let vertex_buffer = Buffer::from_iter(
