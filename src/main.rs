@@ -22,6 +22,14 @@ mod rmiss {
     }
 }
 
+mod srmiss {
+    vulkano_shaders::shader! {
+        ty: "miss",
+        path: "src/shaders/srmiss.glsl",
+        vulkan_version: "1.3",
+    }
+}
+
 
 use anyhow::{Context, Error, Result};
 use bytemuck::{Pod, Zeroable};
@@ -232,6 +240,7 @@ impl GraphicsState {
             khr_buffer_device_address: true,
             khr_spirv_1_4: true,
             khr_shader_float_controls: true,
+            khr_ray_tracing_position_fetch: true,
             ..DeviceExtensions::empty()
         };
 
@@ -239,6 +248,7 @@ impl GraphicsState {
             ray_tracing_pipeline: true,
             acceleration_structure: true,
             buffer_device_address: true,
+            ray_tracing_position_fetch: true,
             ..Default::default()
         };
 
@@ -365,16 +375,23 @@ impl GraphicsState {
                 .entry_point("main")
                 .context("Failed to set entry point")?;
 
+            let shadow_miss = srmiss::load(device.clone())
+                .context("Failed to load shadow miss shader module")?
+                .entry_point("main")
+                .context("Failed to set entry point")?;
+
             let stages = [
                 PipelineShaderStageCreateInfo::new(raygen),
                 PipelineShaderStageCreateInfo::new(miss),
                 PipelineShaderStageCreateInfo::new(closest_hit),
+                PipelineShaderStageCreateInfo::new(shadow_miss),
             ];
 
             let groups = [
                 RayTracingShaderGroupCreateInfo::General { general_shader: 0 },
                 RayTracingShaderGroupCreateInfo::General { general_shader: 1 },
-                RayTracingShaderGroupCreateInfo::TrianglesHit { closest_hit_shader: Some(2), any_hit_shader: None }
+                RayTracingShaderGroupCreateInfo::TrianglesHit { closest_hit_shader: Some(2), any_hit_shader: None },
+                RayTracingShaderGroupCreateInfo::General { general_shader: 3 }
             ];
 
             let layout = PipelineLayout::new(
@@ -392,18 +409,29 @@ impl GraphicsState {
                 RayTracingPipelineCreateInfo {
                     stages: stages.into_iter().collect(),
                     groups: groups.into_iter().collect(),
-                    max_pipeline_ray_recursion_depth: 1,
+                    max_pipeline_ray_recursion_depth: 4,
                     ..RayTracingPipelineCreateInfo::layout(layout)
                 }
             )
             .context("Failed to create raytracing pipeline")?
         };
 
-        let vertices = [
-            MyVertex { position: [-0.5, -0.25, 0.0] },
+        let mut vertices = [
             MyVertex { position: [0.0, 0.5, 0.0] },
+            MyVertex { position: [-0.5, -0.25, 0.0] },
             MyVertex { position: [0.25, -0.1, 0.0] },
+            MyVertex { position: [-0.5, -0.0, 0.0] },
+            MyVertex { position: [-0.1, -0.2, 0.7] },
+            MyVertex { position: [0.55, -0.1, -0.4] },
         ];
+
+        let offset = Vec3::new(0.0, 0.0, -2.0);
+
+        for vertex in &mut vertices {
+            let pos = Vec3::from(vertex.position) + offset;
+            vertex.position = pos.to_array();
+        }
+
 
         let vertex_buffer = Buffer::from_iter(
             memory_allocator.clone(),
