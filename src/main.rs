@@ -24,16 +24,26 @@ mod rmiss {
 
 
 use anyhow::{Context, Error, Result};
+use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use vulkano::acceleration_structure::{AccelerationStructure, AccelerationStructureBuildGeometryInfo, AccelerationStructureBuildRangeInfo, AccelerationStructureBuildType, AccelerationStructureCreateInfo, AccelerationStructureGeometries, AccelerationStructureGeometryInstancesData, AccelerationStructureGeometryInstancesDataType, AccelerationStructureGeometryTrianglesData, AccelerationStructureInstance, AccelerationStructureType, BuildAccelerationStructureFlags, BuildAccelerationStructureMode};
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, ImageBlit};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::allocator::{DescriptorSetAllocator, StandardDescriptorSetAllocator};
+use vulkano::device::DeviceFeatures;
 use vulkano::format::Format;
-use vulkano::image::{Image, ImageCreateInfo, ImageType};
+use vulkano::image::sampler::Filter;
+use vulkano::image::{Image, ImageAspects, ImageCreateInfo, ImageLayout, ImageSubresourceLayers, ImageType};
 use vulkano::image::view::ImageView;
-use vulkano::memory;
-use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
+use vulkano::swapchain::SwapchainPresentInfo;
+use vulkano::{descriptor_set, memory, swapchain};
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryAllocatePreference, MemoryTypeFilter, StandardMemoryAllocator};
+use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
+use vulkano::pipeline::{Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::ray_tracing::{RayTracingPipeline, RayTracingPipelineCreateInfo, RayTracingShaderGroupCreateInfo, ShaderBindingTable};
+use vulkano::shader::spirv::ImageFormat;
 use std::default;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -68,10 +78,20 @@ struct MyVertex {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
 struct Camera {
-    proj: [f32; 16],
-    view: [f32; 16],
+    proj: [[f32; 4]; 4],
+    view: [[f32; 4]; 4],
 }
+
+struct GpuMat4([[f32; 4]; 4]);
+
+impl From<Mat4> for GpuMat4 {
+    fn from(mat: Mat4) -> Self {
+        GpuMat4(mat.to_cols_array_2d())
+    }
+}
+
 
 struct GraphicsState {
     instance: Arc<Instance>,
@@ -79,13 +99,117 @@ struct GraphicsState {
     surface: Arc<Surface>,
     device: Arc<Device>,
     queue: Arc<Queue>,
+    swapchain: Arc<Swapchain>,
     swapchain_images: Vec<Arc<Image>>,
     storage_images: Vec<Arc<ImageView>>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     memory_allocator: Arc<StandardMemoryAllocator>,
+    camera: Camera,
+    raytracing_pipeline: Arc<RayTracingPipeline>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    tlas: Arc<AccelerationStructure>,
+    camera_buffer: Subbuffer<Camera>,
+    shader_binding_table: Arc<ShaderBindingTable>,
 }
 
 impl GraphicsState {
+    fn update(&mut self) -> Result<()> {
+        let (image_index, _suboptimal, acquire_future) = swapchain::acquire_next_image(self.swapchain.clone(), None)
+            .context("Failed to acquire next image from swapchain")?;
+
+        let descriptor_set_layout = self.raytracing_pipeline.layout().set_layouts().get(0).context("No descriptor set layout found")?;
+
+        let descriptor_set = DescriptorSet::new(
+            self.descriptor_set_allocator.clone(),
+            descriptor_set_layout.clone(),
+            [
+                WriteDescriptorSet::acceleration_structure(0, self.tlas.clone()),
+                WriteDescriptorSet::image_view(1, self.storage_images[image_index as usize].clone()),
+                WriteDescriptorSet::buffer(2, self.camera_buffer.clone())
+            ],
+            [],
+        )
+        .context("Failed to create descriptor set")?;
+
+        let mut builder = AutoCommandBufferBuilder::primary(
+            self.command_buffer_allocator.clone(),
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .context("Failed to create command buffer builder")?;
+
+
+
+        builder
+            .bind_pipeline_ray_tracing(self.raytracing_pipeline.clone())
+            .context("Failed to bind raytracing pipeline")?
+            .bind_descriptor_sets(
+                PipelineBindPoint::RayTracing,
+                self.raytracing_pipeline.layout().clone(),
+                0,
+                descriptor_set,
+            )
+            .context("Failed to bind descriptor sets")?;
+
+        unsafe {
+            builder
+                .trace_rays(self.shader_binding_table.addresses().clone(), self.swapchain_images[image_index as usize].extent())
+                .context("Failed to record trace rays command")?;
+        }
+
+        let storage_image = self.storage_images[image_index as usize].image();
+        let swapchain_image = &self.swapchain_images[image_index as usize];
+
+        // Blit from storage image to swapchain image
+        builder
+            .blit_image(BlitImageInfo {
+                src_image_layout: ImageLayout::General,
+                dst_image_layout: ImageLayout::TransferDstOptimal,
+                regions: [ImageBlit {
+                    src_subresource: ImageSubresourceLayers {
+                        aspects: ImageAspects::COLOR,
+                        mip_level: 0,
+                        array_layers: 0..1,
+                    },
+                    src_offsets: [
+                        [0, 0, 0],
+                        [storage_image.extent()[0] as u32, storage_image.extent()[1] as u32, 1],
+                    ],
+                    dst_subresource: ImageSubresourceLayers {
+                        aspects: ImageAspects::COLOR,
+                        mip_level: 0,
+                        array_layers: 0..1,
+                    },
+                    dst_offsets: [
+                        [0, 0, 0],
+                        [swapchain_image.extent()[0] as u32, swapchain_image.extent()[1] as u32, 1],
+                    ],
+                    ..Default::default()
+                }]
+                .into(),
+                filter: Filter::Linear,
+                ..BlitImageInfo::images(storage_image.clone(), swapchain_image.clone())
+            })
+            .context("Failed to blit image")?;
+
+        let command_buffer = builder.build().context("Failed to build command buffer")?;
+
+        let future = now(self.device.clone())
+            .join(acquire_future)
+            .then_execute(self.queue.clone(), command_buffer)
+            .context("Failed to execute command buffer")?
+            .then_swapchain_present(
+                self.queue.clone(),
+                SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_index)
+            )
+            .then_signal_fence_and_flush()
+            .context("Failed to signal fence and flush")?;
+
+        future.wait(None).context("Failed to wait for future")?;
+
+        Ok(())
+    }
+
     fn new(window: Arc<Window>, required_extensions: InstanceExtensions) -> Result<Self> {
         let vulkan_library = VulkanLibrary::new().context("Failed to load Vulkan library")?;
         let instance = Instance::new(
@@ -109,6 +233,13 @@ impl GraphicsState {
             khr_spirv_1_4: true,
             khr_shader_float_controls: true,
             ..DeviceExtensions::empty()
+        };
+
+        let device_features = DeviceFeatures {
+            ray_tracing_pipeline: true,
+            acceleration_structure: true,
+            buffer_device_address: true,
+            ..Default::default()
         };
 
         let (physical_device, queue_family_index) = instance
@@ -143,6 +274,7 @@ impl GraphicsState {
                     ..Default::default()
                 }],
                 enabled_extensions: device_extensions,
+                enabled_features: device_features,
                 ..Default::default()
             },
         )
@@ -196,7 +328,7 @@ impl GraphicsState {
                         memory_allocator.clone(),
                         ImageCreateInfo {
                             image_type: ImageType::Dim2d,
-                            format: image.format(),
+                            format: Format::R16G16B16A16_SFLOAT,
                             extent: image.extent(),
                             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
                             ..Default::default()
@@ -216,6 +348,56 @@ impl GraphicsState {
         let command_buffer_allocator = Arc::new(
             StandardCommandBufferAllocator::new(device.clone(), Default::default())
         );
+
+        let raytracing_pipeline = {
+            let raygen = rgen::load(device.clone())
+                .context("Failed to load raygen shader module")?
+                .entry_point("main")
+                .context("Failed to set entry point")?;
+
+            let closest_hit = rchit::load(device.clone())
+                .context("Failed to load closest hit shader module")?
+                .entry_point("main")
+                .context("Failed to set entry point")?;
+
+            let miss = rmiss::load(device.clone())
+                .context("Failed to load miss shader module")?
+                .entry_point("main")
+                .context("Failed to set entry point")?;
+
+            let stages = [
+                PipelineShaderStageCreateInfo::new(raygen),
+                PipelineShaderStageCreateInfo::new(miss),
+                PipelineShaderStageCreateInfo::new(closest_hit),
+            ];
+
+            let groups = [
+                RayTracingShaderGroupCreateInfo::General { general_shader: 0 },
+                RayTracingShaderGroupCreateInfo::General { general_shader: 1 },
+                RayTracingShaderGroupCreateInfo::TrianglesHit { closest_hit_shader: Some(2), any_hit_shader: None }
+            ];
+
+            let layout = PipelineLayout::new(
+                device.clone(),
+                PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+                    .into_pipeline_layout_create_info(device.clone())
+                    .context("Failed to create pipeline layout")?
+            )
+            .context("Failed to create pipeline layout")?;
+
+
+            RayTracingPipeline::new(
+                device.clone(),
+                None,
+                RayTracingPipelineCreateInfo {
+                    stages: stages.into_iter().collect(),
+                    groups: groups.into_iter().collect(),
+                    max_pipeline_ray_recursion_depth: 1,
+                    ..RayTracingPipelineCreateInfo::layout(layout)
+                }
+            )
+            .context("Failed to create raytracing pipeline")?
+        };
 
         let vertices = [
             MyVertex { position: [0.0, -0.5, 0.0] },
@@ -267,16 +449,47 @@ impl GraphicsState {
             Vec3::new(0.0, -1.0, 0.0),
         );
 
+        let camera = Camera {
+            proj: GpuMat4::from(proj).0,
+            view: GpuMat4::from(view).0,
+        };
+
+        let camera_buffer = Buffer::from_data(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            camera,
+        )
+        .context("Failed to create camera buffer")?;
+
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(device.clone(), Default::default()));
+
+        let shader_binding_table = Arc::new(ShaderBindingTable::new(memory_allocator.clone(), &raytracing_pipeline)
+            .context("Failed to create shader binding table")?);
+
         Ok(Self {
             instance,
             window,
             surface,
             device,
             queue,
+            swapchain,
             swapchain_images,
             storage_images,
             command_buffer_allocator,
-            memory_allocator
+            memory_allocator,
+            camera,
+            raytracing_pipeline,
+            descriptor_set_allocator,
+            tlas,
+            camera_buffer,
+            shader_binding_table,
         })
     }
 }
@@ -346,8 +559,11 @@ impl ApplicationHandler for App {
                         FRAME_COUNT = 0;
                     }
                 }
-                if let Some(_graphics_state) = self.graphics_state.as_ref() {
-                    // Empty for now
+                if let Some(graphics_state) = self.graphics_state.as_mut() {
+                    if let Err(e) = graphics_state.update() {
+                        self.error = Some(e);
+                        event_loop.exit();
+                    }
                 } else {
                     self.error = Some(anyhow::anyhow!("Graphics state not initialized"));
                     event_loop.exit();
