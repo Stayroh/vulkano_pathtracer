@@ -1,14 +1,75 @@
+mod rgen {
+    vulkano_shaders::shader! {
+        ty: "raygen",
+        path: "src/shaders/rgen.glsl",
+        vulkan_version: "1.3",
+    }
+}
+
+mod rchit {
+    vulkano_shaders::shader! {
+        ty: "closesthit",
+        path: "src/shaders/rchit.glsl",
+        vulkan_version: "1.3",  
+    }
+}
+
+mod rmiss {
+    vulkano_shaders::shader! {
+        ty: "miss",
+        path: "src/shaders/rmiss.glsl",
+        vulkan_version: "1.3",
+    }
+}
+
+
 use anyhow::{Context, Error, Result};
-use vulkano::{VulkanLibrary, device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags, physical::PhysicalDeviceType}, image::ImageUsage, instance::{Instance, InstanceExtensions}, swapchain::{Surface, Swapchain, SwapchainCreateInfo}};
+use vulkano::image::{Image, ImageCreateInfo, ImageType};
+use vulkano::image::view::ImageView;
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use std::default;
+use std::fmt::Debug;
 use std::sync::Arc;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
+use vulkano::{
+    VulkanLibrary,
+    buffer::BufferContents,
+    device::{
+        Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
+        physical::PhysicalDeviceType,
+    },
+    image::ImageUsage,
+    instance::{Instance, InstanceExtensions},
+    pipeline::graphics::vertex_input::Vertex,
+    swapchain::{Surface, Swapchain, SwapchainCreateInfo},
+};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{self, Window, WindowAttributes, WindowId},
 };
+
+
+
+#[derive(BufferContents, Vertex)]
+#[repr(C)]
+struct MyVertex {
+    #[format(R32G32B32_SFLOAT)]
+    position: [f32; 3],
+}
+
+const VERTICES: [MyVertex; 3] = [
+    MyVertex {
+        position: [0.0, -0.5, 0.0],
+    },
+    MyVertex {
+        position: [0.5, 0.5, 0.0],
+    },
+    MyVertex {
+        position: [-0.5, 0.5, 0.0],
+    },
+];
 
 struct GraphicsState {
     instance: Arc<Instance>,
@@ -20,15 +81,13 @@ struct GraphicsState {
 
 impl GraphicsState {
     fn new(window: Arc<Window>, required_extensions: InstanceExtensions) -> Result<Self> {
-        let vulkan_library = VulkanLibrary::new()
-            .context("Failed to load Vulkan library")?;
+        let vulkan_library = VulkanLibrary::new().context("Failed to load Vulkan library")?;
         let instance = Instance::new(
             vulkan_library,
             vulkano::instance::InstanceCreateInfo {
                 enabled_extensions: required_extensions,
                 ..Default::default()
             },
-
         )
         .context("Failed to create Vulkan Instance")?;
 
@@ -55,7 +114,8 @@ impl GraphicsState {
                     .iter()
                     .enumerate()
                     .position(|(i, q)| {
-                        q.queue_flags.intersects(QueueFlags::GRAPHICS | QueueFlags::COMPUTE)
+                        q.queue_flags
+                            .intersects(QueueFlags::GRAPHICS | QueueFlags::COMPUTE)
                             && p.surface_support(i as u32, &surface).unwrap_or(false)
                     })
                     .map(|q| (p, q as u32))
@@ -82,7 +142,9 @@ impl GraphicsState {
         )
         .context("Failed to create logical device")?;
 
-        let queue = queues.next().context("Failed to extract first queue out of queues")?;
+        let queue = queues
+            .next()
+            .context("Failed to extract first queue out of queues")?;
 
         let (mut swapchain, swapchain_images) = {
             let caps = physical_device
@@ -91,14 +153,18 @@ impl GraphicsState {
 
             let dimensions = window.inner_size();
 
-            let composite_alpha = caps.supported_composite_alpha.into_iter().next().context("No supported composite alpha")?;
+            let composite_alpha = caps
+                .supported_composite_alpha
+                .into_iter()
+                .next()
+                .context("No supported composite alpha")?;
             let image_format = physical_device
                 .surface_formats(&surface, Default::default())
                 .context("Failed to get surface formats")?
                 .get(0)
                 .context("No surface formats found")?
                 .0;
-            
+
             Swapchain::new(
                 device.clone(),
                 surface.clone(),
@@ -106,16 +172,41 @@ impl GraphicsState {
                     min_image_count: caps.min_image_count,
                     image_format,
                     image_extent: dimensions.into(),
-                    image_usage: ImageUsage::COLOR_ATTACHMENT,
+                    image_usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_DST,
                     composite_alpha,
                     ..Default::default()
-                }
+                },
             )
             .context("Failed to create swapchain")?
         };
 
-        
-        
+        let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+
+        let storage_images = swapchain_images
+            .iter()
+            .map(|image| {
+                ImageView::new_default(
+                    Image::new(
+                        memory_allocator.clone(),
+                        ImageCreateInfo {
+                            image_type: ImageType::Dim2d,
+                            format: image.format(),
+                            extent: image.extent(),
+                            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+                            ..Default::default()
+                        },
+                        AllocationCreateInfo {
+                            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                            ..Default::default()
+                        }
+                    )
+                    .context("Failed to create storage image")?
+                )
+                .context("Failed to create image view for storage image")
+            })
+            .collect::<Result<Vec<_>>>()
+            .context("Failed to create storage images")?;
+
 
         Ok(Self {
             instance,
@@ -136,18 +227,17 @@ struct App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let result = ( || -> Result<()> {
+        let result = (|| -> Result<()> {
             let window = Arc::new(
                 event_loop
                     .create_window(Window::default_attributes())
-                    .context("Failed to create window")?
+                    .context("Failed to create window")?,
             );
 
             let required_extensions = Surface::required_extensions(event_loop)
                 .context("Failed to get required extensions")?;
 
-            self.graphics_state =
-                Some(GraphicsState::new(window.clone(), required_extensions)?);
+            self.graphics_state = Some(GraphicsState::new(window.clone(), required_extensions)?);
 
             self.window = Some(window);
 
@@ -182,7 +272,7 @@ impl ApplicationHandler for App {
                     if let Some(last_time) = LAST_TIME {
                         FRAME_COUNT += 1;
                         let elapsed = now.duration_since(last_time);
-                        if true {//elapsed >= Duration::from_secs(1) {
+                        if elapsed >= Duration::from_secs(1) {
                             let fps = FRAME_COUNT as f64 / elapsed.as_secs_f64();
                             println!("FPS: {:.2}", fps);
                             LAST_TIME = Some(now);
@@ -212,9 +302,6 @@ impl ApplicationHandler for App {
         }
     }
 }
-
-
-
 
 fn main() {
     if let Err(e) = run() {
