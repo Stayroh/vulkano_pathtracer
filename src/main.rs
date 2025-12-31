@@ -52,6 +52,8 @@ use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::pipeline::ray_tracing::{RayTracingPipeline, RayTracingPipelineCreateInfo, RayTracingShaderGroupCreateInfo, ShaderBindingTable};
 use vulkano::shader::spirv::ImageFormat;
+use winit::event::{DeviceEvent, ElementState, KeyEvent};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use std::default;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -76,6 +78,9 @@ use winit::{
     window::{self, Window, WindowAttributes, WindowId},
 };
 
+use crate::camera::{Camera, CameraController, CameraUniform};
+
+mod camera;
 
 
 #[derive(BufferContents, Vertex)]
@@ -83,13 +88,6 @@ use winit::{
 struct MyVertex {
     #[format(R32G32B32_SFLOAT)]
     position: [f32; 3],
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-struct Camera {
-    view: [[f32; 4]; 4],
-    proj: [[f32; 4]; 4],
 }
 
 struct GpuMat4([[f32; 4]; 4]);
@@ -116,12 +114,31 @@ struct GraphicsState {
     raytracing_pipeline: Arc<RayTracingPipeline>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     tlas: Arc<AccelerationStructure>,
-    camera_buffer: Subbuffer<Camera>,
+    camera_buffer: Subbuffer<CameraUniform>,
     shader_binding_table: Arc<ShaderBindingTable>,
+    controller: CameraController,
+    last_frame_time: Instant
+
 }
 
 impl GraphicsState {
     fn update(&mut self) -> Result<()> {
+        let now_time = Instant::now();
+        let delta_time = (now_time - self.last_frame_time).as_secs_f32();
+        self.last_frame_time = now_time;
+
+        self.controller.update_camera(&mut self.camera, delta_time);
+        self.camera.update(delta_time);
+
+        let camera_uniforms = self.camera.get_ray_tracing_uniforms();
+
+        {
+            let mut content = self.camera_buffer.write().context("Failed to write to camera buffer")?;
+            *content = camera_uniforms;
+        }
+
+
+
         let (image_index, _suboptimal, acquire_future) = swapchain::acquire_next_image(self.swapchain.clone(), None)
             .context("Failed to acquire next image from swapchain")?;
 
@@ -470,17 +487,15 @@ impl GraphicsState {
             )
         };
 
-        let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 4.0 / 3.0, 0.01, 100.0);
-        let view = Mat4::look_at_rh(
-            Vec3::new(0.0, 0.0, 1.0),
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(0.0, -1.0, 0.0),
-        );
+        let size = window.inner_size();
 
-        let camera = Camera {
-            proj: GpuMat4::from(proj).0,
-            view: GpuMat4::from(view).0,
-        };
+        let camera = Camera::new(size.width, size.height, 70.0_f32.to_radians());
+
+        let controller = CameraController::new(1.0, 0.02);
+
+
+
+        let camera_unfiorm = camera.get_ray_tracing_uniforms();
 
         let camera_buffer = Buffer::from_data(
             memory_allocator.clone(),
@@ -492,7 +507,7 @@ impl GraphicsState {
                 memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            camera,
+            camera_unfiorm,
         )
         .context("Failed to create camera buffer")?;
 
@@ -518,7 +533,61 @@ impl GraphicsState {
             tlas,
             camera_buffer,
             shader_binding_table,
+            controller,
+            last_frame_time: Instant::now(),
         })
+    }
+
+    fn handle_window_event(&mut self, event: &WindowEvent, window: &Window) -> bool {
+        match event {
+            WindowEvent::Resized(size) => {
+                self.camera.resize(size.width, size.height);
+                // Handle Vulkan swapchain recreation here
+                true
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(key_code),
+                        state,
+                        ..
+                    },
+                ..
+            } => {
+                // Toggle mouse capture with Escape
+                if *key_code == KeyCode::Escape && *state == ElementState::Pressed {
+                    let new_state = !self.controller.is_mouse_captured();
+                    self.controller.set_mouse_captured(new_state);
+                    window.set_cursor_visible(!new_state);
+                    let _ = window.set_cursor_grab(if new_state {
+                        winit::window::CursorGrabMode::Confined
+                    } else {
+                        winit::window::CursorGrabMode::None
+                    });
+                    return true;
+                }
+
+                self.controller.process_keyboard(*key_code, *state)
+            }
+            WindowEvent::MouseInput { button, state, .. } => {
+                if *button == winit::event::MouseButton::Left && *state == ElementState::Pressed {
+                    self.controller.set_mouse_captured(true);
+                    window.set_cursor_visible(false);
+                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+    
+    fn handle_device_event(&mut self, event: &DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            self.controller
+                .process_mouse(delta.0, delta.1, &mut self.camera);
+        }
     }
 }
 
@@ -560,6 +629,11 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+
+        if let (Some(graphics_state), Some(window)) = (&mut self.graphics_state, &self.window) {
+            graphics_state.handle_window_event(&event, window);
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 println!("Requested to close window");
@@ -606,6 +680,17 @@ impl ApplicationHandler for App {
             }
 
             _ => (),
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let Some(graphics_state) = &mut self.graphics_state {
+            graphics_state.handle_device_event(&event);
         }
     }
 }
