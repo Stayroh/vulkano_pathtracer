@@ -86,7 +86,7 @@ use vulkano::{
     swapchain::{Surface, Swapchain, SwapchainCreateInfo},
     sync::{GpuFuture, now},
 };
-use winit::event::{DeviceEvent, ElementState, KeyEvent};
+use winit::event::{DeviceEvent, ElementState, KeyEvent, MouseScrollDelta};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::{
     application::ApplicationHandler,
@@ -592,7 +592,7 @@ impl GraphicsState {
 
         let camera = Camera::new(size.width, size.height, 70.0_f32.to_radians());
 
-        let controller = CameraController::new(1.0, 0.02);
+        let controller = CameraController::new(1.0, 0.1);
 
         let camera_unfiorm = camera.get_ray_tracing_uniforms();
 
@@ -621,6 +621,15 @@ impl GraphicsState {
                 .context("Failed to create shader binding table")?,
         );
 
+
+        let sky_img = image::open("assets/sky/golden_gate_hills_4k.hdr")
+            .context("Failed to load sky image")?
+            .to_rgba32f();
+        
+        let image_dimensions = sky_img.dimensions();
+
+        let raw_hdr_data: Vec<[f32; 4]> = sky_img.pixels().map(|p| p.0).collect();
+
         Ok(Self {
             instance,
             window,
@@ -646,11 +655,18 @@ impl GraphicsState {
 
     fn handle_window_event(&mut self, event: &WindowEvent, window: &Window) -> bool {
         match event {
+            WindowEvent::Focused(false) => {
+                self.controller.reset_input_state();
+                window.set_cursor_visible(true);
+                let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                true
+            }
             WindowEvent::Resized(size) => {
                 self.camera.resize(size.width, size.height);
                 // Handle Vulkan swapchain recreation here
                 true
             }
+
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -660,30 +676,36 @@ impl GraphicsState {
                     },
                 ..
             } => {
-                // Toggle mouse capture with Escape
-                if *key_code == KeyCode::Escape && *state == ElementState::Pressed {
-                    let new_state = !self.controller.is_mouse_captured();
-                    self.controller.set_mouse_captured(new_state);
-                    window.set_cursor_visible(!new_state);
-                    let _ = window.set_cursor_grab(if new_state {
-                        winit::window::CursorGrabMode::Confined
-                    } else {
-                        winit::window::CursorGrabMode::None
-                    });
-                    return true;
-                }
-
                 self.controller.process_keyboard(*key_code, *state)
             }
             WindowEvent::MouseInput { button, state, .. } => {
-                if *button == winit::event::MouseButton::Left && *state == ElementState::Pressed {
+                if *button == winit::event::MouseButton::Right && *state == ElementState::Pressed {
                     self.controller.set_mouse_captured(true);
-                    window.set_cursor_visible(false);
-                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
+                    //window.set_cursor_visible(false);
+                    println!("Mouse Button Down");
+                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
                     true
                 } else {
+                    //window.set_cursor_visible(true);
+                    self.controller.set_mouse_captured(false);                    
+                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                    println!("Mouse Button Up");
                     false
                 }
+            }
+            WindowEvent::MouseWheel { device_id: _, delta, .. } => {
+                match delta {
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        println!("Pixel Delta Scroll: {:?}", pos);
+                    }
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        println!("Line Delta Scroll: x: {}, y: {}", x, y);
+                    }
+                }
+                if let MouseScrollDelta::LineDelta(_, y) = delta {
+                    self.controller.process_scroll(*y, &mut self.camera);
+                };
+                true
             }
             _ => false,
         }

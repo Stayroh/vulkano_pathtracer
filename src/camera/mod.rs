@@ -54,6 +54,11 @@ impl Camera {
         }
     }
 
+    pub fn set_fov(&mut self, fov: f32) {
+        self.fov = fov;
+        self.projection = Mat4::perspective_rh(self.fov, self.aspect_ratio, self.near, self.far);
+    }
+
     pub fn update(&mut self, delta_time: f32) {
         self.rig.update(delta_time);
     }
