@@ -13,6 +13,12 @@ void main() {
     vec3 pos2 = gl_HitTriangleVertexPositionsEXT[2];
 
     vec3 geometricNormal = normalize(cross(pos1 - pos0, pos2 - pos0));
+    bool isFrontFacing = (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT);
+    
+    // Flip normal if we hit from the back
+    if (!isFrontFacing) {
+        geometricNormal = -geometricNormal;
+    }
     vec3 normal = normalize(mat3(gl_ObjectToWorldEXT) * geometricNormal);
 
     vec3 barycentrics = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
@@ -20,7 +26,7 @@ void main() {
     vec3 object_hit_position = pos0 * barycentrics.x + pos1 * barycentrics.y + pos2 * barycentrics.z;
     vec3 hit_position = (gl_ObjectToWorldEXT * vec4(object_hit_position, 1.0)).xyz;
 
-    vec3 light_position = vec3(1.0, 2.2, -2.9);
+    vec3 light_position = vec3(0.5, 2.0, 1.0);
     vec3 light_color = vec3(1.0, 1.0, 1.0) * 2.0;
 
     vec3 to_light = light_position - hit_position;
@@ -61,10 +67,10 @@ void main() {
     
     hit_value = vec3(0.0);
 
-    traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xff, 0, 0, 0, shadow_ray_origin, 0.00001, reflection_dir, 10000.0, 0);
+    //traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xff, 0, 0, 0, shadow_ray_origin, 0.00001, reflection_dir, 10000.0, 0);
 
 
-    vec3 base_color = barycentrics;
+    vec3 base_color = vec3(1.0);
 
-    hit_value = light_color * combined_light * base_color * 0.5 + hit_value * base_color * 2.0;
+    hit_value = light_color * combined_light * base_color * 1.0 + hit_value * base_color * 0.0;
 }

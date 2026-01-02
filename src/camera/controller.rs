@@ -14,6 +14,7 @@ pub struct CameraController {
     speed: f32,
     sensitivity: f32,
     mouse_captured: bool,
+    print_debug: bool,
 }
 
 impl CameraController {
@@ -28,6 +29,7 @@ impl CameraController {
             speed,
             sensitivity,
             mouse_captured: false,
+            print_debug: false,
         }
     }
 
@@ -70,8 +72,12 @@ impl CameraController {
                 self.move_up = pressed;
                 true
             }
-            KeyCode::ShiftLeft | KeyCode::ControlLeft => {
+            KeyCode::ShiftLeft => {
                 self.move_down = pressed;
+                true
+            }
+            KeyCode::KeyP => {
+                self.print_debug = pressed;
                 true
             }
             _ => false,
@@ -94,7 +100,7 @@ impl CameraController {
 
     pub fn update_camera(&self, camera: &mut Camera, delta_time: f32) {
         let mut movement = Vec3::ZERO;
-
+        
         if self.move_forward {
             movement.z -= 1.0;
         }
@@ -113,10 +119,20 @@ impl CameraController {
         if self.move_down {
             movement.y -= 1.0;
         }
-
+        if self.print_debug {
+            camera.debug_print();
+        }
+        
         if movement != Vec3::ZERO {
             movement = movement.normalize() * self.speed * delta_time;
-            camera.rig_mut().driver_mut::<Position>().translate(movement);
+            
+            // Get camera's rotation from the rig
+            let rotation: glam::Quat = camera.rig_mut().final_transform.rotation.into();
+            
+            // Transform movement from camera space to world space
+            let world_movement = rotation * movement;
+            
+            camera.rig_mut().driver_mut::<Position>().translate(world_movement);
         }
     }
 }
