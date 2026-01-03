@@ -2,10 +2,25 @@
 #extension GL_EXT_ray_tracing : require
 #extension GL_EXT_ray_tracing_position_fetch : require
 
+struct Payload {
+	vec3 color;
+	uint depth;
+};
+
 layout(binding = 0, set = 0) uniform accelerationStructureEXT tlas;
-layout(location = 0) rayPayloadInEXT vec3 hit_value;
+layout(location = 0) rayPayloadInEXT Payload hit_value;
 layout(location = 1) rayPayloadEXT float shadow_hit;
+layout(push_constant) uniform PushConstants {
+    uint max_ray_recursion_depth;
+    float time;
+} pc;
 hitAttributeEXT vec2 attribs;
+
+struct Light {
+    vec3 position;
+    vec3 color;
+    float intensity;
+};
 
 void main() {
     vec3 pos0 = gl_HitTriangleVertexPositionsEXT[0];
@@ -26,51 +41,90 @@ void main() {
     vec3 object_hit_position = pos0 * barycentrics.x + pos1 * barycentrics.y + pos2 * barycentrics.z;
     vec3 hit_position = (gl_ObjectToWorldEXT * vec4(object_hit_position, 1.0)).xyz;
 
-    vec3 light_position = vec3(0.5, 2.0, 1.0);
-    vec3 light_color = vec3(1.0, 1.0, 1.0) * 2.0;
+    if (dot(normal, vec3(0.0, 1.0, 0.0)) > 0.99) {
+        if (hit_value.depth < pc.max_ray_recursion_depth) {
 
-    vec3 to_light = light_position - hit_position;
-    vec3 to_light_dir = normalize(to_light);
-    float to_light_distance = length(to_light);
+            //BLAY>TT MATHEMATICN FAILUREE
+            vec3 tangent_x = normalize(cross(normal, vec3(1.0, 0.0, 0.0)));
+            vec3 tangent_y = normalize(cross(tangent_x, normal));
+            float scale = 20.0;
+            float offset = pc.time * 10.0;
+            vec3 normal_offset = tangent_x * sin(hit_position.x * scale + offset) + tangent_y * cos(hit_position.z * scale + offset);
+            vec3 modified_normal = normalize(normal + normal_offset * 0.02);
 
-    float light_influence = max(0.0, dot(to_light_dir, normal));
-    
+            //Reflexione sukaa blyatt
+            vec3 reflection_dir = gl_WorldRayDirectionEXT - 2.0 * dot(gl_WorldRayDirectionEXT, modified_normal) * modified_normal;
+            vec3 reflection_ray_origin = hit_position + normal * 0.00001;
 
-    shadow_hit = 0.0;
+            hit_value.color = vec3(0.0);
+            hit_value.depth += 1;
 
-    vec3 shadow_ray_origin = hit_position + normal * 0.00001;
-
-    if (light_influence > 0.0) {
-        traceRayEXT(
-            tlas,
-            gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-            0xFF,
-            0,
-            0,
-            1,
-            shadow_ray_origin,
-            0.00001,
-            to_light_dir,
-            to_light_distance,
-            1
+            traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xff, 0, 0, 0, reflection_ray_origin, 0.00001, reflection_dir, 10000.0, 0);
+        } else {
+            hit_value.color = vec3(0.0);
+        }
+    } else {
+        Light lights[2] = Light[](
+            Light(vec3(3.0, 1.0, 0.0), vec3(1.0, 0.1, 0.1), 2.0),
+            Light(vec3(-3.0, 1.0, 0.0), vec3(0.1, 0.1, 1.0), 2.0)
         );
+
+        vec3 total_light = vec3(0.0);
+
+        vec3 global_light_offset = vec3(0.0);
+
+        float sin_t = sin(pc.time);
+        float cos_t = cos(pc.time);
+
+        vec3 x_head = vec3(cos_t, 0.0, sin_t);
+        vec3 y_head = vec3(0.0, 1.0, 0.0);
+        vec3 z_head = vec3(-sin_t, 0.0, cos_t);
+
+        for (int i = 0; i < 2; i++) {
+            Light light = lights[i];
+            vec3 light_position = light.position;
+            light_position = x_head * light_position.x + y_head * light_position.y + z_head * light_position.z + global_light_offset;
+
+
+            vec3 light_color = light.color * light.intensity;
+
+            vec3 to_light = light_position - hit_position;
+            vec3 to_light_dir = normalize(to_light);
+            float to_light_distance = length(to_light);
+
+            float light_influence = max(0.0, dot(to_light_dir, normal));
+            
+
+            shadow_hit = 0.0;
+
+            vec3 shadow_ray_origin = hit_position + normal * 0.00001;
+
+            if (light_influence > 0.0) {
+                traceRayEXT(
+                    tlas,
+                    gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                    0xFF,
+                    0,
+                    0,
+                    1,
+                    shadow_ray_origin,
+                    0.00001,
+                    to_light_dir,
+                    to_light_distance,
+                    1
+                );
+            }
+            
+
+            float attenuation = 1.0 / pow(to_light_distance, 1.0);
+            float combined_light = light_influence * attenuation * shadow_hit * 0.9 + 0.1;
+
+            total_light += combined_light * light_color;
+        }
+
+        vec3 base_color = vec3(1.0);
+
+        hit_value.color = total_light * base_color * 1.0;
     }
     
-
-    float attenuation = 1.0 / pow(to_light_distance, 1.0);
-    float combined_light = light_influence * attenuation * shadow_hit * 0.9 + 0.1;
-
-
-    //Reflexione sukaa blyatt
-
-    vec3 reflection_dir = gl_WorldRayDirectionEXT - 2.0 * dot(gl_WorldRayDirectionEXT, normal) * normal;
-    
-    hit_value = vec3(0.0);
-
-    //traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xff, 0, 0, 0, shadow_ray_origin, 0.00001, reflection_dir, 10000.0, 0);
-
-
-    vec3 base_color = vec3(1.0);
-
-    hit_value = light_color * combined_light * base_color * 1.0 + hit_value * base_color * 0.0;
 }

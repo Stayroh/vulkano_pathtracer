@@ -114,6 +114,15 @@ impl From<Mat4> for GpuMat4 {
     }
 }
 
+const RAY_RECURSION_DEPTH: u32 = 4;
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct PushConstants {
+    max_ray_recursion_depth: u32,
+    time: f32,
+}
+
 struct GraphicsState {
     instance: Arc<Instance>,
     window: Arc<Window>,
@@ -134,6 +143,7 @@ struct GraphicsState {
     controller: CameraController,
     last_frame_time: Instant,
     recreate_swapchain: bool,
+    time: Instant,
 }
 
 fn create_storage_images(swapchain_images: &Vec<Arc<Image>>, memory_allocator: Arc<StandardMemoryAllocator>) -> Result<Vec<Arc<ImageView>>> {
@@ -236,6 +246,13 @@ impl GraphicsState {
         )
         .context("Failed to create descriptor set")?;
 
+
+
+        let push_constants = PushConstants {
+            max_ray_recursion_depth: RAY_RECURSION_DEPTH,
+            time: self.time.elapsed().as_secs_f32(),
+        };
+
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
@@ -252,7 +269,9 @@ impl GraphicsState {
                 0,
                 descriptor_set,
             )
-            .context("Failed to bind descriptor sets")?;
+            .context("Failed to bind descriptor sets")?
+            .push_constants(self.raytracing_pipeline.layout().clone(), 0, push_constants)
+            .context("Failed to push constants")?;
 
         unsafe {
             builder
@@ -495,7 +514,7 @@ impl GraphicsState {
                 RayTracingPipelineCreateInfo {
                     stages: stages.into_iter().collect(),
                     groups: groups.into_iter().collect(),
-                    max_pipeline_ray_recursion_depth: 4,
+                    max_pipeline_ray_recursion_depth: RAY_RECURSION_DEPTH,
                     ..RayTracingPipelineCreateInfo::layout(layout)
                 },
             )
@@ -538,7 +557,26 @@ impl GraphicsState {
             },
             MyVertex {
                 position: [-10.0, 0.0, 10.0],
+            }, //
+            MyVertex {
+                position: [-10.0, 0.0, -5.0],
             },
+            MyVertex {
+                position: [10.0, 0.0, -5.0],
+            },
+            MyVertex {
+                position: [10.0, 10.0, -5.0],
+            },
+            MyVertex {
+                position: [-10.0, 0.0, -5.0],
+            },
+            MyVertex {
+                position: [10.0, 10.0, -5.0],
+            },
+            MyVertex {
+                position: [-10.0, 10.0, -5.0],
+            },
+
         ];
 
         let offset = Vec3::new(0.0, 0.0, 0.0);
@@ -630,6 +668,8 @@ impl GraphicsState {
 
         let raw_hdr_data: Vec<[f32; 4]> = sky_img.pixels().map(|p| p.0).collect();
 
+        let start_time = Instant::now();
+
         Ok(Self {
             instance,
             window,
@@ -650,6 +690,7 @@ impl GraphicsState {
             controller,
             last_frame_time: Instant::now(),
             recreate_swapchain: false,
+            time: start_time,
         })
     }
 

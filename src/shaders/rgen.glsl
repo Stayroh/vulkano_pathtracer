@@ -10,7 +10,12 @@ layout(binding = 2, set = 0) uniform CameraProperties
 	mat4 proj_inverse;
 } cam;
 
-layout(location = 0) rayPayloadEXT vec3 hit_value;
+struct Payload {
+	vec3 color;
+	uint depth;
+};
+
+layout(location = 0) rayPayloadEXT Payload hit_value;
 
 void main() 
 {
@@ -30,9 +35,9 @@ void main()
 	float t_min = 0.001;
 	float t_max = 10000.0;
 
-    hit_value = vec3(0.0);
+    hit_value = Payload(vec3(0.0), 1);
 
     traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xff, 0, 0, 0, origin.xyz, t_min, direction.xyz, t_max, 0);
 
-	imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(hit_value, 0.0));
+	imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(hit_value.color, 0.0));
 }
