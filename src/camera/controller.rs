@@ -1,8 +1,8 @@
 use super::Camera;
 use dolly::prelude::*;
 use glam::Vec3;
-use winit::event::{ElementState, KeyEvent};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::event::{ElementState};
+use winit::keyboard::{KeyCode};
 
 pub struct CameraController {
     move_forward: bool,
@@ -39,9 +39,11 @@ impl CameraController {
         }
     }
 
+    /*
     pub fn is_mouse_captured(&self) -> bool {
         self.mouse_captured
     }
+    */
 
     pub fn set_mouse_captured(&mut self, captured: bool) {
         self.mouse_captured = captured;
@@ -60,7 +62,7 @@ impl CameraController {
         self.local_down = false;
         self.mouse_captured = false;
     }
-
+    /*
     pub fn set_speed(&mut self, speed: f32) {
         self.speed = speed;
     }
@@ -68,7 +70,7 @@ impl CameraController {
     pub fn set_sensitivity(&mut self, sensitivity: f32) {
         self.sensitivity = sensitivity;
     }
-
+    */
     pub fn process_keyboard(&mut self, key_code: KeyCode, state: ElementState) -> bool {
         let pressed = state == ElementState::Pressed;
         match key_code {

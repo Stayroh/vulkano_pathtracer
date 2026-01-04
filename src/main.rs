@@ -32,9 +32,7 @@ mod srmiss {
 
 use anyhow::{Context, Error, Result};
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
-use std::default;
-use std::fmt::Debug;
+use glam::{Vec3};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vulkano::acceleration_structure::{
@@ -50,7 +48,7 @@ use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, ImageBlit,
 };
-use vulkano::descriptor_set::allocator::{DescriptorSetAllocator, StandardDescriptorSetAllocator};
+use vulkano::descriptor_set::allocator::{StandardDescriptorSetAllocator};
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::DeviceFeatures;
 use vulkano::format::Format;
@@ -60,7 +58,7 @@ use vulkano::image::{
     Image, ImageAspects, ImageCreateInfo, ImageLayout, ImageSubresourceLayers, ImageType,
 };
 use vulkano::memory::allocator::{
-    AllocationCreateInfo, MemoryAllocatePreference, MemoryTypeFilter, StandardMemoryAllocator,
+    AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator,
 };
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::ray_tracing::{
@@ -70,9 +68,8 @@ use vulkano::pipeline::ray_tracing::{
 use vulkano::pipeline::{
     Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo,
 };
-use vulkano::shader::spirv::ImageFormat;
-use vulkano::swapchain::SwapchainPresentInfo;
-use vulkano::{Validated, ValidationError, VulkanError, descriptor_set, memory, swapchain};
+use vulkano::swapchain::{CompositeAlpha, SwapchainPresentInfo};
+use vulkano::{Validated, VulkanError, swapchain};
 use vulkano::{
     VulkanLibrary,
     buffer::BufferContents,
@@ -87,12 +84,12 @@ use vulkano::{
     sync::{GpuFuture, now},
 };
 use winit::event::{DeviceEvent, ElementState, KeyEvent, MouseScrollDelta};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{PhysicalKey};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::{self, Window, WindowAttributes, WindowId},
+    window::{Window, WindowId},
 };
 
 use crate::camera::{Camera, CameraController, CameraUniform};
@@ -106,13 +103,6 @@ struct MyVertex {
     position: [f32; 3],
 }
 
-struct GpuMat4([[f32; 4]; 4]);
-
-impl From<Mat4> for GpuMat4 {
-    fn from(mat: Mat4) -> Self {
-        GpuMat4(mat.to_cols_array_2d())
-    }
-}
 
 const RAY_RECURSION_DEPTH: u32 = 4;
 
@@ -124,9 +114,9 @@ pub struct PushConstants {
 }
 
 struct GraphicsState {
-    instance: Arc<Instance>,
+    //instance: Arc<Instance>,
     window: Arc<Window>,
-    surface: Arc<Surface>,
+    //surface: Arc<Surface>,
     device: Arc<Device>,
     queue: Arc<Queue>,
     swapchain: Arc<Swapchain>,
@@ -195,6 +185,11 @@ impl GraphicsState {
             self.recreate_swapchain = false;
 
             let new_dimensions = self.window.inner_size();
+
+            if new_dimensions.width == 0 || new_dimensions.height == 0 {
+                println!("Skipping swapchain recreation due to zero dimensions");
+                return Ok(());
+            }
 
             let (new_swapchain, new_swapchain_images) = self.swapchain.recreate(SwapchainCreateInfo {
                 image_extent: new_dimensions.into(),
@@ -426,24 +421,39 @@ impl GraphicsState {
 
             let dimensions = window.inner_size();
 
+            println!("Surface capabilities: {:?}", caps.supported_composite_alpha);
+
             let composite_alpha = caps
                 .supported_composite_alpha
                 .into_iter()
-                .next()
-                .context("No supported composite alpha")?;
-            let image_format = physical_device
+                .find(|&a| {
+                    a == CompositeAlpha::PreMultiplied
+                    || a == CompositeAlpha::PostMultiplied
+                })
+                .unwrap_or(CompositeAlpha::Opaque);
+
+
+            let available_image_formats = physical_device
                 .surface_formats(&surface, Default::default())
-                .context("Failed to get surface formats")?
-                .get(0)
-                .context("No surface formats found")?
-                .0;
+                .context("Failed to get surface formats")?;
+
+            println!("Available surface formats:");
+            for format in &available_image_formats {
+                println!("  {:?}", format);
+            }
+
+            let image_format = available_image_formats
+                .iter()
+                .find(|(format, _)| *format == Format::B8G8R8A8_SRGB)
+                .cloned()
+                .unwrap_or(available_image_formats[0]).0;
 
             Swapchain::new(
                 device.clone(),
                 surface.clone(),
                 SwapchainCreateInfo {
                     min_image_count: caps.min_image_count,
-                    image_format,
+                    image_format: Format::R16G16B16A16_SFLOAT,
                     image_extent: dimensions.into(),
                     image_usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_DST,
                     composite_alpha,
@@ -660,20 +670,20 @@ impl GraphicsState {
         );
 
 
-        let sky_img = image::open("assets/sky/golden_gate_hills_4k.hdr")
-            .context("Failed to load sky image")?
-            .to_rgba32f();
+        //let sky_img = image::open("assets/sky/golden_gate_hills_4k.hdr")
+        //    .context("Failed to load sky image")?
+        //    .to_rgba32f();
         
-        let image_dimensions = sky_img.dimensions();
+        //let image_dimensions = sky_img.dimensions();
 
-        let raw_hdr_data: Vec<[f32; 4]> = sky_img.pixels().map(|p| p.0).collect();
+        //let raw_hdr_data: Vec<[f32; 4]> = sky_img.pixels().map(|p| p.0).collect();
 
         let start_time = Instant::now();
 
         Ok(Self {
-            instance,
+            //instance,
             window,
-            surface,
+            //surface,
             device,
             queue,
             swapchain,
@@ -723,14 +733,12 @@ impl GraphicsState {
                 if *button == winit::event::MouseButton::Right && *state == ElementState::Pressed {
                     self.controller.set_mouse_captured(true);
                     //window.set_cursor_visible(false);
-                    println!("Mouse Button Down");
                     let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
                     true
                 } else {
                     //window.set_cursor_visible(true);
                     self.controller.set_mouse_captured(false);                    
                     let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
-                    println!("Mouse Button Up");
                     false
                 }
             }
@@ -772,7 +780,7 @@ impl ApplicationHandler for App {
         let result = (|| -> Result<()> {
             let window = Arc::new(
                 event_loop
-                    .create_window(Window::default_attributes())
+                    .create_window(Window::default_attributes().with_transparent(true).with_title("Vulkan Pathtracer"))
                     .context("Failed to create window")?,
             );
 

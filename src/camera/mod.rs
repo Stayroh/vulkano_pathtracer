@@ -71,10 +71,11 @@ impl Camera {
         Mat4::from_rotation_translation(rotation, position).inverse()
     }
 
+    /*
     pub fn projection_matrix(&self) -> Mat4 {
         self.projection
     }
-
+    */
     pub fn inverse_view_matrix(&self) -> Mat4 {
         self.view_matrix().inverse()
     }
@@ -83,10 +84,11 @@ impl Camera {
         self.projection.inverse()
     }
 
+    /*
     pub fn position(&self) -> Vec3 {
         self.rig.final_transform.position.into()
     }
-
+    */
     pub fn get_ray_tracing_uniforms(&self) -> CameraUniform {
         let inv_view = self.inverse_view_matrix();
         let inv_proj = self.inverse_projection_matrix();

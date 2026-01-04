@@ -17,6 +17,24 @@ struct Payload {
 
 layout(location = 0) rayPayloadEXT Payload hit_value;
 
+vec3 aces(vec3 x) {
+  const float a = 2.51;
+  const float b = 0.03;
+  const float c = 2.43;
+  const float d = 0.59;
+  const float e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+float aces(float x) {
+  const float a = 2.51;
+  const float b = 0.03;
+  const float c = 2.43;
+  const float d = 0.59;
+  const float e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
 void main() 
 {
 
@@ -39,5 +57,14 @@ void main()
 
     traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xff, 0, 0, 0, origin.xyz, t_min, direction.xyz, t_max, 0);
 
-	imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(hit_value.color, 0.0));
+	vec3 tonemapped_color = aces(hit_value.color);
+
+	vec4 pixel_color = vec4(tonemapped_color, 1.0);
+	//pixel_color.w = pow(length(tonemapped_color), 0.2);
+
+	if (length(tonemapped_color) == 0) {
+		pixel_color.w = 0.0;
+	}
+
+	imageStore(image, ivec2(gl_LaunchIDEXT.xy), pixel_color);
 }

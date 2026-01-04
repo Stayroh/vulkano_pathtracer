@@ -41,16 +41,21 @@ void main() {
     vec3 object_hit_position = pos0 * barycentrics.x + pos1 * barycentrics.y + pos2 * barycentrics.z;
     vec3 hit_position = (gl_ObjectToWorldEXT * vec4(object_hit_position, 1.0)).xyz;
 
-    if (dot(normal, vec3(0.0, 1.0, 0.0)) > 0.99) {
+    bool is_mirror = dot(normal, vec3(0.0, 1.0, 0.0)) > 0.99;
+
+    vec3 diffuse_color = vec3(0.0);
+    vec3 glossy_color = vec3(0.0);
+
+    if (false) {
         if (hit_value.depth < pc.max_ray_recursion_depth) {
 
             //BLAY>TT MATHEMATICN FAILUREE
             vec3 tangent_x = normalize(cross(normal, vec3(1.0, 0.0, 0.0)));
             vec3 tangent_y = normalize(cross(tangent_x, normal));
-            float scale = 20.0;
+            float scale = 50.0;
             float offset = pc.time * 10.0;
             vec3 normal_offset = tangent_x * sin(hit_position.x * scale + offset) + tangent_y * cos(hit_position.z * scale + offset);
-            vec3 modified_normal = normalize(normal + normal_offset * 0.02);
+            vec3 modified_normal = normalize(normal + normal_offset * 0.005);
 
             //Reflexione sukaa blyatt
             vec3 reflection_dir = gl_WorldRayDirectionEXT - 2.0 * dot(gl_WorldRayDirectionEXT, modified_normal) * modified_normal;
@@ -60,13 +65,14 @@ void main() {
             hit_value.depth += 1;
 
             traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xff, 0, 0, 0, reflection_ray_origin, 0.00001, reflection_dir, 10000.0, 0);
-        } else {
-            hit_value.color = vec3(0.0);
+
+            glossy_color = hit_value.color;
         }
-    } else {
+    } 
+    if (true) {
         Light lights[2] = Light[](
-            Light(vec3(3.0, 1.0, 0.0), vec3(1.0, 0.1, 0.1), 2.0),
-            Light(vec3(-3.0, 1.0, 0.0), vec3(0.1, 0.1, 1.0), 2.0)
+            Light(vec3(3.0, 1.0, 0.0), vec3(1.0, 0.1, 0.1), 5.0),
+            Light(vec3(-3.0, 1.0, 0.0), vec3(0.1, 0.1, 1.0), 5.0)
         );
 
         vec3 total_light = vec3(0.0);
@@ -124,7 +130,9 @@ void main() {
 
         vec3 base_color = vec3(1.0);
 
-        hit_value.color = total_light * base_color * 1.0;
+
+        diffuse_color = total_light * base_color * 1.0;
     }
-    
+
+    hit_value.color = diffuse_color + glossy_color;
 }
